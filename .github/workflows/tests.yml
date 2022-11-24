@@ -1,0 +1,126 @@
+---
+name: tests
+
+on:
+  push:
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
+      - ".gitignore"
+      - ".pre-commit-config.yaml"
+
+env:
+  CACHE_DIR: /tmp/.workflow_cache
+  POETRY_CACHE_DIR: /tmp/.workflow_cache/.pip_packages
+  POETRY_VIRTUALENVS_PATH: /tmp/.workflow_cache/.venvs
+  POETRY_HOME: /tmp/.workflow_cache/.poetry
+  PIP_CACHE_DIR: /tmp/.workflow_cache/.pip_packages
+  MYPY_CACHE_DIR: /tmp/.workflow_cache/.mypy
+
+jobs:
+  tests:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ["ubuntu-latest"]
+        python-version: ["3.x", "3.8", "3.9", "3.10"]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache dependencies
+        uses: actions/cache@v3
+        id: cache
+        with:
+          path: ${{ env.CACHE_DIR }}
+          key: tests-${{ matrix.os }}-${{ matrix.python-version }}--${{ hashFiles('**/poetry.lock') }}
+
+      - name: Install dependencies
+        run: |
+          curl -sSL https://install.python-poetry.org | python -
+          $POETRY_HOME/bin/poetry install -n -E "all"
+        if: steps.cache.outputs.cache-hit != 'true'
+
+      - name: Python code style
+        run: $POETRY_HOME/bin/poetry run black . --check --diff --preview
+        if: ${{ matrix.python-version == '3.x' }}
+
+      - name: Python code quality
+        run: $POETRY_HOME/bin/poetry run flake8 --docstring-convention google
+        if: ${{ matrix.python-version == '3.x' }}
+
+      - name: Python code typing
+        run: $POETRY_HOME/bin/poetry run mypy --strict --install-types --non-interactive .
+        if: ${{ matrix.python-version == '3.x' }}
+
+      - name: Python code complexity
+        run: $POETRY_HOME/bin/poetry run radon cc -n C aio_lambda_api 1>&2
+        if: ${{ matrix.python-version == '3.x' }}
+
+      - name: Python code maintainability
+        run: $POETRY_HOME/bin/poetry run radon mi -n B aio_lambda_api 1>&2
+        if: ${{ matrix.python-version == '3.x' }}
+
+      - name: Python code security
+        run: $POETRY_HOME/bin/poetry run bandit aio_lambda_api -rs B404,B603
+        if: ${{ matrix.python-version == '3.x' }}
+
+      - name: YAML code style
+        run: $POETRY_HOME/bin/poetry run yamllint -s .
+        if: ${{ matrix.python-version == '3.x' }}
+
+      - name: Test
+        run: $POETRY_HOME/bin/poetry run pytest --junitxml=test-results.xml --cov-report xml
+        if: ${{ always() }}
+
+      - name: Collect coverage report
+        uses: codecov/codecov-action@v3
+
+  publish:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: ["ubuntu-latest"]
+        python-version: ["3.x"]
+    if: ${{ github.repository == 'Accelize/aio_lambda_api' && github.ref_type == 'tag' }}
+    needs: [tests]
+    environment: PyPI
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache dependencies
+        uses: actions/cache@v3
+        id: cache
+        with:
+          path: ${{ env.CACHE_DIR }}
+          key: tests-${{ matrix.os }}-${{ matrix.python-version }}--${{ hashFiles('**/poetry.lock') }}
+
+      - name: Build packages
+        run: $POETRY_HOME/bin/poetry version $(echo -e "${{ github.ref_name }}" | tr -d 'v')
+
+      - name: Publish packages on PyPI
+        run: $POETRY_HOME/bin/poetry publish --build
+        env:
+          POETRY_PYPI_TOKEN_PYPI: ${{ secrets.PYPI_TOKEN }}
+
+      - name: Publish release on GitHub
+        run: |
+          go install github.com/tcnksm/ghr@latest
+          ~/go/bin/ghr -generatenotes $PRERELEASE -c ${{ github.sha }} ${{ github.ref_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRERELEASE: ${{ contains(github.ref_name, '-') && '-prerelease' || '' }}
